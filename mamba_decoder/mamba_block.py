@@ -35,6 +35,7 @@ class MoEConfig(BaseModel):
             Defaults to True.
         bias_update_rate (float): Learning rate for updating adaptive bias. Defaults to 0.01.
     """
+
     dim: int = 512
     n_experts: int = (6,)
     n_activated: int = (8,)
@@ -389,4 +390,3 @@ class MambaDecoder(nn.Module):
             x = self.mla_block(x, start_pos, mask)
 
         return self.head(x)
-
