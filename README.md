@@ -19,16 +19,12 @@ graph TB
     Input[Token IDs<br/>Shape: batch × seq_len] --> Embed[Embedding Layer<br/>vocab_size → dim]
     Embed --> PostNorm{Post Embed<br/>Norm?}
     PostNorm -->|Yes| Norm1[RMSNorm]
-    PostNorm -->|No| Layers
-    Norm1 --> Layers
+    PostNorm -->|No| Block1[MambaDecoderBlock 1]
+    Norm1 --> Block1
     
-    subgraph Layers[Mamba Decoder Blocks × depth]
-        direction TB
-        Layers --> Block1[MambaDecoderBlock 1]
-        Block1 --> Block2[MambaDecoderBlock 2]
-        Block2 --> BlockN[...]
-        BlockN --> BlockLast[MambaDecoderBlock N]
-    end
+    Block1 --> Block2[MambaDecoderBlock 2]
+    Block2 --> BlockN["..."]
+    BlockN --> BlockLast["MambaDecoderBlock N<br/>(× depth)"]
     
     BlockLast --> PostMLA{Post Mamba<br/>MLA Block?}
     PostMLA -->|Yes| MLABlock[MLABlock]
