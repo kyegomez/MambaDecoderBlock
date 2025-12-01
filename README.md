@@ -32,15 +32,10 @@ graph TB
     
     BlockLast --> PostMLA{Post Mamba<br/>MLA Block?}
     PostMLA -->|Yes| MLABlock[MLABlock]
-    PostMLA -->|No| OutputHead
-    MLABlock --> OutputHead
+    PostMLA -->|No| Norm2[RMSNorm]
+    MLABlock --> Norm2
     
-    subgraph OutputHead[Output Head]
-        direction TB
-        OutputHead --> Norm2[RMSNorm]
-        Norm2 --> Linear[Linear Projection<br/>dim → vocab_size]
-    end
-    
+    Norm2 --> Linear[Linear Projection<br/>dim → vocab_size]
     Linear --> Output[Logits<br/>Shape: batch × seq_len × vocab_size]
     
 ```
