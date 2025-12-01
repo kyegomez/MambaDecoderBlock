@@ -17,6 +17,24 @@ from simple_mla import SimpleMLA
 
 
 class MoEConfig(BaseModel):
+    """
+    Configuration for Mixture of Experts (MoE) layer.
+
+    This configuration class defines the parameters needed to initialize a MoE layer,
+    including the number of experts, activation strategy, and adaptive bias settings.
+
+    Args:
+        dim (int): Model dimension. Defaults to 512.
+        n_experts (int): Number of expert networks in the MoE layer. Defaults to 6.
+        n_activated (int): Number of experts to activate per token. Defaults to 8.
+        expert_inter_dim (Optional[int]): Intermediate dimension for expert networks.
+            If None, uses default dimension. Defaults to None.
+        shared_expert_inter_dim (Optional[int]): Intermediate dimension for shared expert.
+            If None, uses default dimension. Defaults to None.
+        use_adaptive_bias (bool): Whether to use adaptive bias in expert selection.
+            Defaults to True.
+        bias_update_rate (float): Learning rate for updating adaptive bias. Defaults to 0.01.
+    """
     dim: int = 512
     n_experts: int = (6,)
     n_activated: int = (8,)
@@ -27,6 +45,31 @@ class MoEConfig(BaseModel):
 
 
 class MambaDecoderBlock(nn.Module):
+    """
+    A decoder block combining Mamba state space model with Mixture of Experts (MoE).
+
+    This block implements a transformer-like decoder architecture that uses:
+    - Mamba for efficient sequence modeling with state space models
+    - MoE for parameter-efficient feed-forward processing
+    - RMSNorm for normalization
+
+    The forward pass follows a residual structure:
+    1. Normalize input and apply Mamba, add residual
+    2. Normalize Mamba output and apply MoE, add residual
+
+    Args:
+        dim (int): Model dimension. Defaults to 512.
+        mamba_config (MambaConfig): Configuration for the Mamba layer. If None, uses default.
+        moe_config (MoEConfig): Configuration for the MoE layer. If None, uses default.
+
+    Example:
+        >>> mamba_config = MambaConfig(d_model=512, n_layers=1)
+        >>> moe_config = MoEConfig(dim=512, n_experts=6, n_activated=2)
+        >>> block = MambaDecoderBlock(dim=512, mamba_config=mamba_config, moe_config=moe_config)
+        >>> x = torch.randn(2, 128, 512)
+        >>> out = block(x)
+    """
+
     def __init__(
         self,
         dim: int = 512,
@@ -52,6 +95,15 @@ class MambaDecoderBlock(nn.Module):
         self.norm = nn.RMSNorm(dim)
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass through the MambaDecoderBlock.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
+        """
         residual = x
 
         normed = self.norm(residual)
@@ -68,6 +120,47 @@ class MambaDecoderBlock(nn.Module):
 
 
 class MLABlock(nn.Module):
+    """
+    A decoder block combining Multi-Head Latent Attention (MLA) with Mixture of Experts (MoE).
+
+    This block implements a transformer-like decoder architecture that uses:
+    - SimpleMLA for efficient attention with LoRA-based projections and rotary embeddings
+    - MoE for parameter-efficient feed-forward processing
+    - RMSNorm for normalization
+
+    The forward pass follows a residual structure:
+    1. Normalize input and apply MLA attention, add residual
+    2. Normalize MLA output and apply MoE, add residual
+
+    Args:
+        dim (int): Model dimension. Defaults to 2048.
+        n_heads (int): Number of attention heads. Defaults to 16.
+        q_lora_rank (int): LoRA rank for query projection. If 0, uses full rank. Defaults to 0.
+        kv_lora_rank (int): LoRA rank for key-value projection. Defaults to 512.
+        qk_nope_head_dim (int): Dimension for non-positional Q/K projections. Defaults to 128.
+        qk_rope_head_dim (int): Dimension for rotary-positional Q/K projections. Defaults to 64.
+        v_head_dim (int): Dimension for value projections. Defaults to 128.
+        max_batch_size (int): Maximum batch size for KV cache. Defaults to 8.
+        max_seq_len (int): Maximum sequence length for KV cache. Defaults to 4096.
+        attn_impl (Literal["naive", "absorb"]): Attention implementation mode.
+            "naive" uses standard attention, "absorb" uses latent attention. Defaults to "absorb".
+        rope_theta (float): Base for rotary positional encoding. Defaults to 10000.0.
+        mscale (float): Scaling factor for extended attention. Defaults to 1.0.
+        n_experts (int): Number of expert networks in the MoE layer. Defaults to 12.
+        n_activated (int): Number of experts to activate per token. Defaults to 4.
+        expert_inter_dim (Optional[int]): Intermediate dimension for expert networks.
+            If None, uses default dimension. Defaults to None.
+        shared_expert_inter_dim (Optional[int]): Intermediate dimension for shared expert.
+            If None, uses default dimension. Defaults to None.
+        use_adaptive_bias (bool): Whether to use adaptive bias in expert selection. Defaults to True.
+        bias_update_rate (float): Learning rate for updating adaptive bias. Defaults to 0.01.
+
+    Example:
+        >>> block = MLABlock(dim=2048, n_heads=16, max_seq_len=4096)
+        >>> x = torch.randn(2, 1024, 2048)
+        >>> out = block(x, start_pos=0, mask=None)
+    """
+
     def __init__(
         self,
         dim: int = 2048,
@@ -143,6 +236,20 @@ class MLABlock(nn.Module):
         start_pos: int = 0,
         mask: Optional[torch.Tensor] = None,
     ) -> Tensor:
+        """
+        Forward pass through the MLABlock.
+
+        Args:
+            x (Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            start_pos (int): Starting position in the sequence for attention caching.
+                Used for efficient incremental decoding. Defaults to 0.
+            mask (Optional[torch.Tensor]): Attention mask of shape (seq_len, seq_len).
+                Values should be 0 for valid positions and -inf for masked positions.
+                Defaults to None.
+
+        Returns:
+            Tensor: Output tensor of shape (batch_size, seq_len, dim).
+        """
         residual = x
 
         # Normalize and apply MLA
@@ -155,6 +262,50 @@ class MLABlock(nn.Module):
 
 
 class MambaDecoder(nn.Module):
+    """
+    A full decoder model combining Mamba blocks with optional MLA attention.
+
+    This model implements a complete language model decoder architecture with:
+    - Token embeddings
+    - Optional post-embedding normalization
+    - Stack of MambaDecoderBlocks for sequence modeling
+    - Optional MLABlock after Mamba blocks for attention-based refinement
+    - Output head for vocabulary prediction
+
+    The architecture allows for flexible configurations:
+    - Pure Mamba-based decoding (post_mamba_mla_block=False)
+    - Hybrid Mamba + MLA decoding (post_mamba_mla_block=True)
+
+    Args:
+        heads (int): Number of attention heads for MLA block. Defaults to 64.
+        vocab_size (int): Size of the vocabulary. Defaults to 50000.
+        max_seq_len (int): Maximum sequence length. Defaults to 512.
+        depth (int): Number of MambaDecoderBlocks to stack. Defaults to 6.
+        dim (int): Model dimension. Defaults to 512.
+        post_embed_norm (bool): Whether to apply normalization after embedding.
+            Defaults to True.
+        mamba_config (MambaConfig): Configuration for Mamba layers. If None, uses default.
+        moe_config (MoEConfig): Configuration for MoE layers. If None, uses default.
+        post_mamba_mla_block (bool): Whether to apply MLABlock after Mamba blocks.
+            If True, adds attention-based refinement. Defaults to False.
+
+    Example:
+        >>> mamba_config = MambaConfig(d_model=512, n_layers=1)
+        >>> moe_config = MoEConfig(dim=512, n_experts=6, n_activated=2)
+        >>> model = MambaDecoder(
+        ...     vocab_size=32000,
+        ...     max_seq_len=128,
+        ...     depth=6,
+        ...     dim=512,
+        ...     heads=64,
+        ...     mamba_config=mamba_config,
+        ...     moe_config=moe_config,
+        ...     post_mamba_mla_block=True
+        ... )
+        >>> x = torch.randint(0, 32000, (2, 128))
+        >>> out = model(x, start_pos=0, mask=None)
+    """
+
     def __init__(
         self,
         heads: int = 64,
@@ -211,6 +362,20 @@ class MambaDecoder(nn.Module):
         start_pos: int = 0,
         mask: Optional[torch.Tensor] = None,
     ) -> Tensor:
+        """
+        Forward pass through the MambaDecoder.
+
+        Args:
+            x: Input token indices of shape (batch_size, seq_len).
+            start_pos (int): Starting position in the sequence for attention caching.
+                Used for efficient incremental decoding. Defaults to 0.
+            mask (Optional[torch.Tensor]): Attention mask of shape (seq_len, seq_len).
+                Values should be 0 for valid positions and -inf for masked positions.
+                Only used if post_mamba_mla_block is True. Defaults to None.
+
+        Returns:
+            Tensor: Output logits of shape (batch_size, seq_len, vocab_size).
+        """
         x = self.embedding(x)
 
         if self.post_embed_norm is True:
@@ -225,73 +390,3 @@ class MambaDecoder(nn.Module):
 
         return self.head(x)
 
-
-# # Test
-# x = torch.randint(0, 32000, (2, 128))
-
-# model = MambaDecoder(
-#     vocab_size=32000,
-#     max_seq_len=128,
-#     depth=6,
-#     dim=512,
-#     post_embed_norm=True,
-#     mamba_config=MambaConfig(
-#         d_model=512,
-#         n_layers=1,
-#     ),
-#     moe_config=MoEConfig(
-#         dim=512,
-#         n_experts=6,
-#         n_activated=2,
-#         expert_inter_dim=None,
-#         shared_expert_inter_dim=None,
-#         use_adaptive_bias=True,
-#         bias_update_rate=0.01,
-#     ),
-# )
-
-# out = model(x)
-# print(out.shape)
-# print(out)
-
-# # Mla Test
-# x = torch.randn(1, 1024, 2048)
-# start_pos = 0
-# mask = None
-
-# model = MLABlock()
-# out = model(x, start_pos, mask)
-# print(out.shape)
-# print(out)
-
-
-# Post mamba mla test
-# Test
-x = torch.randint(0, 32000, (2, 128))
-
-model = MambaDecoder(
-    vocab_size=32000,
-    max_seq_len=128,
-    depth=6,
-    dim=512,
-    heads=64,
-    post_embed_norm=True,
-    mamba_config=MambaConfig(
-        d_model=512,
-        n_layers=1,
-    ),
-    moe_config=MoEConfig(
-        dim=512,
-        n_experts=6,
-        n_activated=2,
-        expert_inter_dim=None,
-        shared_expert_inter_dim=None,
-        use_adaptive_bias=True,
-        bias_update_rate=0.01,
-    ),
-    post_mamba_mla_block=True,
-)
-
-out = model(x, start_pos=0, mask=None)
-print(out.shape)
-print(out)

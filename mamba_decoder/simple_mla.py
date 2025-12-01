@@ -1,3 +1,20 @@
+"""
+Simple Multi-Head Latent Attention (MLA) implementation.
+
+This module provides a pure PyTorch implementation of MLA, an efficient attention mechanism
+that uses LoRA-based projections, rotary positional embeddings (RoPE), and KV caching for
+efficient inference. The module includes:
+
+- RMSNorm: Root Mean Square Layer Normalization
+- precompute_freqs_cis: Precompute rotary positional embedding frequencies
+- apply_rotary_emb: Apply rotary positional embeddings to tensors
+- SimpleMLA: Multi-Head Latent Attention module
+
+The implementation supports two attention modes:
+- "naive": Standard attention with full K/V cache
+- "absorb": Latent attention with compressed KV cache for memory efficiency
+"""
+
 from typing import Optional, Literal
 
 import torch
@@ -8,9 +25,21 @@ class RMSNorm(nn.Module):
     """
     Root Mean Square Layer Normalization (RMSNorm).
 
+    RMSNorm is a normalization technique that normalizes inputs by their root mean square
+    instead of mean and variance. It's computationally more efficient than LayerNorm as it
+    doesn't require computing the mean, and has been shown to work well in transformer models.
+
+    The normalization formula is: output = (x / RMS(x)) * weight
+    where RMS(x) = sqrt(mean(x^2) + eps)
+
     Args:
         dim (int): Dimension of the input tensor.
         eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
+
+    Example:
+        >>> norm = RMSNorm(dim=512)
+        >>> x = torch.randn(2, 128, 512)
+        >>> out = norm(x)
     """
 
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -40,16 +69,33 @@ def precompute_freqs_cis(
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """
-    Precompute frequency-based complex exponential values for rotary positional embeddings.
+    Precompute frequency-based complex exponential values for rotary positional embeddings (RoPE).
+
+    This function precomputes the complex exponential values used in Rotary Position Embedding (RoPE).
+    RoPE encodes positional information by rotating the query and key vectors in the complex plane,
+    allowing the model to understand relative positions between tokens.
+
+    The frequencies are computed as: freq_i = 1 / (theta^(2i/head_dim))
+    where i ranges from 0 to head_dim/2 - 1.
 
     Args:
-        seq_len (int): Maximum sequence length.
-        head_dim (int): Dimension of each attention head (must be even).
-        theta (float): Base for rotary positional encoding. Defaults to 10000.0.
-        device (Optional[torch.device]): Device to create tensors on.
+        seq_len (int): Maximum sequence length for which to precompute frequencies.
+        head_dim (int): Dimension of each attention head (must be even for complex representation).
+        theta (float): Base frequency for rotary positional encoding. Higher values create
+            slower-varying frequencies. Defaults to 10000.0.
+        device (Optional[torch.device]): Device to create tensors on. If None, uses default device.
 
     Returns:
         torch.Tensor: Precomputed complex exponential values of shape (seq_len, head_dim // 2).
+            Each value represents e^(i * position * frequency) for the corresponding position
+            and frequency pair.
+
+    Raises:
+        AssertionError: If head_dim is not even.
+
+    Example:
+        >>> freqs_cis = precompute_freqs_cis(seq_len=4096, head_dim=64, theta=10000.0)
+        >>> print(freqs_cis.shape)  # (4096, 32)
     """
     assert head_dim % 2 == 0, "head_dim must be even for rotary embeddings"
 
@@ -72,14 +118,30 @@ def precompute_freqs_cis(
 
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
-    Apply rotary positional embeddings to the input tensor.
+    Apply rotary positional embeddings (RoPE) to the input tensor.
+
+    This function applies rotary positional embeddings by rotating pairs of elements in the
+    input tensor using complex multiplication. The input tensor is interpreted as complex numbers
+    (pairs of real numbers), rotated by the precomputed frequencies, and converted back to real numbers.
+
+    The rotation is applied element-wise: for each position and frequency pair, the corresponding
+    complex number in the input is multiplied by the complex exponential from freqs_cis.
 
     Args:
-        x (torch.Tensor): Input tensor of shape (..., seq_len, head_dim).
+        x (torch.Tensor): Input tensor of shape (..., seq_len, head_dim) where head_dim must be even.
+            The last dimension is interpreted as pairs of real numbers representing complex numbers.
         freqs_cis (torch.Tensor): Precomputed complex exponential values of shape (seq_len, head_dim // 2).
+            These are typically computed using precompute_freqs_cis().
 
     Returns:
         torch.Tensor: Tensor with rotary embeddings applied, same shape as input.
+            The tensor has been rotated in the complex plane according to positional frequencies.
+
+    Example:
+        >>> x = torch.randn(2, 128, 64)  # (batch, seq_len, head_dim)
+        >>> freqs_cis = precompute_freqs_cis(seq_len=128, head_dim=64)
+        >>> x_rotated = apply_rotary_emb(x, freqs_cis)
+        >>> print(x_rotated.shape)  # (2, 128, 64)
     """
     dtype = x.dtype
 
@@ -103,25 +165,55 @@ class SimpleMLA(nn.Module):
     """
     Simple Multi-Head Latent Attention (MLA) implementation in pure PyTorch.
 
-    This implementation captures the core ideas of MLA:
-    - LoRA-based low-rank projections for Q and KV
+    MLA is an efficient attention mechanism that combines several optimization techniques:
+    - LoRA-based low-rank projections for Q and KV to reduce parameters
     - Split attention into positional (RoPE) and non-positional components
-    - KV caching for efficient inference
-    - Two attention modes: naive (standard) and absorb (latent)
+    - KV caching for efficient incremental inference
+    - Two attention modes: naive (standard) and absorb (latent attention)
+
+    The "absorb" mode is more memory-efficient as it caches in the latent space rather than
+    the full key-value space, reducing memory requirements for long sequences.
+
+    Architecture:
+        - Query (Q): Can use full rank or LoRA projection, split into non-positional and RoPE parts
+        - Key-Value (KV): Always uses LoRA projection, split into latent KV and positional K
+        - Attention: Computes scores from both positional and non-positional components
+        - Output: Projects attention output back to model dimension
 
     Args:
-        dim (int): Model dimension.
-        n_heads (int): Number of attention heads.
-        q_lora_rank (int): LoRA rank for query projection. If 0, uses full rank.
-        kv_lora_rank (int): LoRA rank for key-value projection.
-        qk_nope_head_dim (int): Dimension for non-positional Q/K projections.
-        qk_rope_head_dim (int): Dimension for rotary-positional Q/K projections.
-        v_head_dim (int): Dimension for value projections.
-        max_batch_size (int): Maximum batch size for KV cache.
-        max_seq_len (int): Maximum sequence length for KV cache.
+        dim (int): Model dimension. Defaults to 2048.
+        n_heads (int): Number of attention heads. Defaults to 16.
+        q_lora_rank (int): LoRA rank for query projection. If 0, uses full rank projection.
+            Higher values increase capacity but also parameters. Defaults to 0.
+        kv_lora_rank (int): LoRA rank for key-value projection. This determines the size of
+            the latent KV cache in "absorb" mode. Defaults to 512.
+        qk_nope_head_dim (int): Dimension for non-positional Q/K projections per head.
+            This part doesn't use rotary embeddings. Defaults to 128.
+        qk_rope_head_dim (int): Dimension for rotary-positional Q/K projections per head.
+            This part uses RoPE for positional encoding. Defaults to 64.
+        v_head_dim (int): Dimension for value projections per head. Defaults to 128.
+        max_batch_size (int): Maximum batch size for KV cache allocation. Defaults to 8.
+        max_seq_len (int): Maximum sequence length for KV cache allocation. Defaults to 4096.
         attn_impl (Literal["naive", "absorb"]): Attention implementation mode.
-        rope_theta (float): Base for rotary positional encoding.
-        mscale (float): Scaling factor for extended attention.
+            - "naive": Standard attention with full K/V cache (more memory, simpler)
+            - "absorb": Latent attention with compressed KV cache (less memory, more efficient)
+            Defaults to "absorb".
+        rope_theta (float): Base frequency for rotary positional encoding. Defaults to 10000.0.
+        mscale (float): Scaling factor for extended attention. If not 1.0, multiplies the
+            standard attention scale by mscale^2. Defaults to 1.0.
+
+    Example:
+        >>> model = SimpleMLA(
+        ...     dim=2048,
+        ...     n_heads=16,
+        ...     q_lora_rank=0,
+        ...     kv_lora_rank=512,
+        ...     max_seq_len=4096,
+        ...     attn_impl="absorb"
+        ... )
+        >>> x = torch.randn(2, 1024, 2048)
+        >>> out = model(x, start_pos=0, mask=None)
+        >>> print(out.shape)  # (2, 1024, 2048)
     """
 
     def __init__(
