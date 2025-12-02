@@ -13,7 +13,7 @@ from open_kimi.moe import MoE
 from pydantic import BaseModel
 from torch import Tensor, nn
 
-from simple_mla import SimpleMLA
+from mamba_decoder.simple_mla import SimpleMLA
 
 
 class MoEConfig(BaseModel):
