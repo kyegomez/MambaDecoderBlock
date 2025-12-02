@@ -1,33 +1,35 @@
-"""
-Comprehensive Benchmarking Suite for MambaDecoderBlock
 
-This suite compares:
-1. MambaDecoderBlock vs Regular Mamba (from mambapy)
-2. MambaDecoderBlock vs MLABlock
 
-Metrics evaluated:
-- Speed (throughput in tokens/second)
-- Latency (time per forward pass)
-- Scaling behavior (with sequence length and batch size)
-- Memory usage (optional)
-"""
-
+import gc
 import time
+import warnings
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-import matplotlib.pyplot as plt
-from typing import Dict, List, Optional
-from dataclasses import dataclass
-import gc
-import warnings
-
-# Note: This script assumes nn.RMSNorm is available (PyTorch 2.0+)
-# If you're using an older PyTorch version, you may need to install a compatibility package
-# or use a custom RMSNorm implementation
-
 from mambapy.mamba import Mamba, MambaConfig
-from mamba_decoder.mamba_block import MambaDecoderBlock, MLABlock, MambaConfig as MDMambaConfig, MoEConfig
+
+# Try to import LM from mambapy.lm
+try:
+    from mambapy.lm import LM as MambaLM, MambaConfig as LMMambaConfig
+    HAS_LM = True
+except ImportError:
+    HAS_LM = False
+    print("Warning: mambapy.lm.LM not available, skipping LM benchmarks")
+
+# Try to import Mamba-2
+try:
+    from mambapy.mamba2 import Mamba2, Mamba2Config
+    HAS_MAMBA2 = True
+except ImportError:
+    HAS_MAMBA2 = False
+    print("Warning: mambapy.mamba2 not available, skipping Mamba-2 benchmarks")
+
+from mamba_decoder.mamba_block import MambaConfig as MDMambaConfig
+from mamba_decoder.mamba_block import MambaDecoderBlock, MLABlock, MoEConfig, MambaDecoder
 
 warnings.filterwarnings('ignore')
 
@@ -75,7 +77,7 @@ def get_memory_usage_mb() -> float:
 def benchmark_model(
     model: nn.Module,
     model_name: str,
-    input_tensor: torch.Tensor,
+    input_tokens: torch.Tensor,
     num_warmup: int = 5,
     num_runs: int = 20,
     use_cuda: bool = True,
@@ -84,9 +86,9 @@ def benchmark_model(
     Benchmark a model's forward pass.
     
     Args:
-        model: The model to benchmark
+        model: The model to benchmark (full language model)
         model_name: Name of the model for logging
-        input_tensor: Input tensor (batch_size, seq_len, dim)
+        input_tokens: Input token indices (batch_size, seq_len)
         num_warmup: Number of warmup runs
         num_runs: Number of benchmark runs
         use_cuda: Whether to use CUDA if available
@@ -97,22 +99,22 @@ def benchmark_model(
     device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
-    input_tensor = input_tensor.to(device)
+    input_tokens = input_tokens.to(device)
     
-    batch_size, seq_len, dim = input_tensor.shape
+    batch_size, seq_len = input_tokens.shape
     
     # Handle different forward signatures
     forward_kwargs = {}
-    if isinstance(model, MLABlock):
+    if isinstance(model, MambaDecoder) and model.post_mamba_mla_block:
         forward_kwargs = {"start_pos": 0, "mask": None}
     
     # Warmup runs
     with torch.no_grad():
         for _ in range(num_warmup):
-            if isinstance(model, MLABlock):
-                _ = model(input_tensor, **forward_kwargs)
+            if forward_kwargs:
+                _ = model(input_tokens, **forward_kwargs)
             else:
-                _ = model(input_tensor)
+                _ = model(input_tokens)
     
     # Clear cache
     if torch.cuda.is_available():
@@ -123,10 +125,10 @@ def benchmark_model(
     for _ in range(num_runs):
         with torch.no_grad():
             with TorchTimer() as timer:
-                if isinstance(model, MLABlock):
-                    _ = model(input_tensor, **forward_kwargs)
+                if forward_kwargs:
+                    _ = model(input_tokens, **forward_kwargs)
                 else:
-                    _ = model(input_tensor)
+                    _ = model(input_tokens)
             latencies.append(timer.elapsed * 1000)  # Convert to ms
     
     # Calculate statistics
@@ -159,16 +161,65 @@ def benchmark_model(
     )
 
 
-def create_regular_mamba(dim: int, d_state: int = 16, d_conv: int = 4, expand_factor: int = 2) -> Mamba:
-    """Create a regular Mamba model from mambapy."""
-    config = MambaConfig(
+def create_mamba_lm(dim: int, depth: int = 6, vocab_size: int = 32000, 
+                    d_state: int = 16, d_conv: int = 4, expand_factor: int = 2):
+    """Create a Mamba LM model from mambapy.lm."""
+    if not HAS_LM:
+        raise ImportError("mambapy.lm.LM is not available")
+    config = LMMambaConfig(
         d_model=dim,
-        n_layers=1,
+        n_layers=depth,
         d_state=d_state,
         d_conv=d_conv,
         expand_factor=expand_factor,
     )
-    return Mamba(config=config)
+    return MambaLM(config, vocab_size=vocab_size)
+
+
+def create_mamba2_lm(dim: int, depth: int = 6, vocab_size: int = 32000):
+    """Create a Mamba-2 LM model."""
+    if not HAS_MAMBA2:
+        raise ImportError("mambapy.mamba2 is not available")
+    config = Mamba2Config(
+        d_model=dim,
+        n_layers=depth,
+    )
+    return Mamba2(config, vocab_size=vocab_size)
+
+
+def create_mamba_decoder_model(dim: int, depth: int = 6, vocab_size: int = 32000,
+                               max_seq_len: int = 2048, d_state: int = 16, 
+                               d_conv: int = 4, expand_factor: int = 2,
+                               n_experts: int = 6, n_activated: int = 2,
+                               post_mamba_mla_block: bool = False) -> MambaDecoder:
+    """Create a full MambaDecoder model."""
+    mamba_config = MDMambaConfig(
+        d_model=dim,
+        n_layers=1,  # Each block has 1 layer
+        d_state=d_state,
+        d_conv=d_conv,
+        expand_factor=expand_factor,
+    )
+    moe_config = MoEConfig(
+        dim=dim,
+        n_experts=n_experts,
+        n_activated=n_activated,
+        expert_inter_dim=None,
+        shared_expert_inter_dim=None,
+        use_adaptive_bias=True,
+        bias_update_rate=0.01,
+    )
+    return MambaDecoder(
+        vocab_size=vocab_size,
+        max_seq_len=max_seq_len,
+        depth=depth,
+        dim=dim,
+        heads=64 if post_mamba_mla_block else 16,
+        post_embed_norm=True,
+        mamba_config=mamba_config,
+        moe_config=moe_config,
+        post_mamba_mla_block=post_mamba_mla_block,
+    )
 
 
 def create_mamba_decoder_block(dim: int, d_state: int = 16, d_conv: int = 4, 

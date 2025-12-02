@@ -177,6 +177,67 @@ model = MambaDecoder(
 out = model(x, start_pos=0, mask=None)
 ```
 
+## Benchmarking
+
+The project includes a comprehensive benchmarking suite to compare MambaDecoderBlock performance against Regular Mamba and MLABlock implementations.
+
+### Quick Start
+
+```bash
+# Run benchmarks with default settings
+python benchmark_suite.py
+```
+
+### Custom Configuration
+
+```bash
+# Custom model dimension and test ranges
+python benchmark_suite.py --dim 1024 --seq-lens 256 512 1024 2048 --batch-sizes 1 2 4 8
+
+# CPU-only mode
+python benchmark_suite.py --no-cuda
+
+# Custom output directory for plots
+python benchmark_suite.py --output-dir my_benchmark_results
+```
+
+### Command Line Arguments
+
+- `--dim`: Model dimension (default: 512)
+- `--seq-lens`: Sequence lengths to test (default: [128, 256, 512, 1024, 2048])
+- `--batch-sizes`: Batch sizes to test (default: [1, 2, 4, 8])
+- `--output-dir`: Directory to save plots (default: 'benchmark_plots')
+- `--no-cuda`: Disable CUDA (use CPU only)
+
+### Metrics Evaluated
+
+- **Speed (Throughput)**: Tokens processed per second
+- **Latency**: Time per forward pass in milliseconds
+- **Scaling Behavior**: Performance across different sequence lengths and batch sizes
+- **Parameter Efficiency**: Throughput per million parameters
+
+### Programmatic Usage
+
+```python
+from benchmark_suite import run_scaling_benchmarks, plot_benchmark_results, print_summary_table
+
+# Run benchmarks
+results = run_scaling_benchmarks(
+    dim=512,
+    sequence_lengths=[128, 256, 512, 1024],
+    batch_sizes=[1, 2, 4],
+    use_cuda=True,
+)
+
+# Print summary
+print_summary_table(results)
+
+# Generate plots
+plot_benchmark_results(results, output_dir='my_results')
+```
+
+For detailed benchmarking documentation, see [BENCHMARK_README.md](BENCHMARK_README.md).
+
 ## Architecture Details
 
 ### MambaDecoder Parameters
